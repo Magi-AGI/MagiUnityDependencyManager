@@ -1,0 +1,18 @@
+registries:
+  # key: URL
+  example: https://registry.example.com
+scopes:
+  - com.example
+unity:
+  editor: 6000.2.0f1        # Unity editor version pin
+  rp: urp                   # or 'hdrp'
+  rp_version: 17.0.3        # render pipeline package version
+packages:
+  # package-id: semver
+  com.unity.inputsystem: 1.7.0
+policy:
+  allowGitDependencies: false
+  bannedApis:
+    - Resources.Load
+    - FindObjectOfType
+
