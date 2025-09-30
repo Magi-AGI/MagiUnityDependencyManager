@@ -58,12 +58,78 @@ function Make-Manifest($dep) {
     return @{ dependencies = $deps; scopedRegistries = $scoped }
 }
 
+function Resolve-LocalPackagePath($projectPath, $spec) {
+    if (-not ($spec -is [string])) { return $null }
+    if ($spec -notmatch '^file:') { return $null }
+    $rel = $spec.Substring(5)
+    $base = Resolve-Path -Path $projectPath
+    $full = [System.IO.Path]::GetFullPath((Join-Path $base $rel))
+    return $full
+}
+
+function Read-JsonFile($path) {
+    try { return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { return $null }
+}
+
+function Write-JsonFile($path, $obj) {
+    $json = $obj | ConvertTo-Json -Depth 10
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($path)) | Out-Null
+    [System.IO.File]::WriteAllText($path, $json, $utf8NoBom)
+}
+
+function Derive-DisplayName($name) {
+    if ($name -match '^com\.[^.]+\.(.+)$') { return ($Matches[1] -replace '\.', ' ') -replace '(?<=.)([A-Z])',' $1' }
+    return $name
+}
+
+function Ensure-LocalPackage($projectPath, $pkgName, $spec, $editorVersion) {
+    $pkgRoot = Resolve-LocalPackagePath $projectPath $spec
+    if (-not $pkgRoot) { return }
+
+    $pkgJsonPath = Join-Path $pkgRoot 'package.json'
+    $existing = Read-JsonFile $pkgJsonPath
+
+    # Derive defaults
+    $unityField = if ($editorVersion) { ($editorVersion -split '\.')[0..1] -join '.' } else { '2023.3' }
+    $display = Derive-DisplayName $pkgName
+
+    if ($null -eq $existing) {
+        $obj = [ordered]@{
+            name        = $pkgName
+            displayName = $display
+            version     = '0.0.0-dev'
+            unity       = $unityField
+            description = "Local package for $pkgName"
+            author      = @{ name = 'Magi-AGI' }
+            dependencies= @{}
+        }
+        Write-JsonFile -path $pkgJsonPath -obj $obj
+        Write-Host "Created package.json for $pkgName at $pkgJsonPath" -ForegroundColor Yellow
+    }
+    else {
+        $changed = $false
+        if (-not $existing.name -or ($existing.name -ne $pkgName)) { $existing | Add-Member -NotePropertyName name -NotePropertyValue $pkgName -Force; $changed = $true }
+        if (-not $existing.displayName) { $existing | Add-Member -NotePropertyName displayName -NotePropertyValue $display -Force; $changed = $true }
+        if (-not $existing.version) { $existing | Add-Member -NotePropertyName version -NotePropertyValue '0.0.0-dev' -Force; $changed = $true }
+        if (-not $existing.unity) { $existing | Add-Member -NotePropertyName unity -NotePropertyValue $unityField -Force; $changed = $true }
+        if ($changed) { Write-JsonFile -path $pkgJsonPath -obj $existing; Write-Host "Normalized package.json for $pkgName" -ForegroundColor Yellow }
+    }
+
+    $runtime = Join-Path $pkgRoot 'Runtime'
+    if (-not (Test-Path $runtime)) { New-Item -ItemType Directory -Force -Path $runtime | Out-Null }
+}
+
 function Write-Manifest($projectPath, $manifestObj) {
     $packagesPath = Join-Path $projectPath 'Packages'
     if (!(Test-Path $packagesPath)) { New-Item -ItemType Directory -Force -Path $packagesPath | Out-Null }
     $manifestPath = Join-Path $packagesPath 'manifest.json'
+    # Resolve to absolute path
+    $manifestPath = [System.IO.Path]::GetFullPath($manifestPath)
     $json = $manifestObj | ConvertTo-Json -Depth 5
-    Set-Content -LiteralPath $manifestPath -Value $json -Encoding UTF8
+    # Write without BOM for Unity compatibility
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($manifestPath, $json, $utf8NoBom)
     Write-Host "Wrote manifest: $manifestPath"
 }
 
@@ -115,12 +181,19 @@ function Check-Policy($projectPath, $dep, [switch]$Strict) {
 switch ($Command) {
     'apply' {
         $dep = Parse-Depfile (Join-Path $ProjectPath $Depfile)
+
+        # Ensure local file: packages have valid package.json before generating manifest
+        foreach ($k in $dep.packages.Keys) {
+            $spec = $dep.packages[$k]
+            Ensure-LocalPackage -projectPath $ProjectPath -pkgName $k -spec $spec -editorVersion $dep.unity.editor
+        }
         $manifestObj = Make-Manifest $dep
         Write-Manifest -projectPath $ProjectPath -manifestObj $manifestObj
         Check-Policy -projectPath $ProjectPath -dep $dep -Strict:$Strict | Out-Null
     }
     'verify' {
         $dep = Parse-Depfile (Join-Path $ProjectPath $Depfile)
+        foreach ($k in $dep.packages.Keys) { Ensure-LocalPackage -projectPath $ProjectPath -pkgName $k -spec $dep.packages[$k] -editorVersion $dep.unity.editor }
         $expected = Make-Manifest $dep
         $actual = Load-Manifest $ProjectPath
         if ($actual -eq $null) { Write-Host "No manifest.json present" -ForegroundColor Yellow; if ($Strict){ exit 3 } else { exit 0 } }
