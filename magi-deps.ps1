@@ -1,4 +1,4 @@
-Param(
+﻿Param(
     [Parameter(Mandatory=$true, Position=0)]
     [ValidateSet('apply','verify','policy','init')]
     [string]$Command,
@@ -46,29 +46,121 @@ function Parse-Depfile($path) {
     return $result
 }
 
-function Make-Manifest($dep) {
-    $deps = @{}
-    foreach ($k in $dep.packages.Keys) { $deps[$k] = $dep.packages[$k] }
+function Make-Manifest($dep, $projectPath) {
+    $baseManifest = $null
+    try { $baseManifest = Load-Manifest $projectPath } catch { $baseManifest = $null }
+
+    $deps = [ordered]@{}
+    if ($baseManifest -and $baseManifest.dependencies) {
+        foreach ($prop in $baseManifest.dependencies.PSObject.Properties) {
+            $deps[$prop.Name] = $prop.Value
+        }
+    }
+
+    $lockDeps = Load-LockDependencies $projectPath
+    foreach ($name in ($lockDeps.Keys | Sort-Object)) {
+        if (-not $deps.Contains($name)) {
+            $deps[$name] = $lockDeps[$name]
+        }
+    }
+
+    foreach ($k in ($dep.packages.Keys | Sort-Object)) { $deps[$k] = $dep.packages[$k] }
     if ($dep.unity.rp -eq 'urp' -and $dep.unity.rp_version) { $deps['com.unity.render-pipelines.universal'] = $dep.unity.rp_version }
     if ($dep.unity.rp -eq 'hdrp' -and $dep.unity.rp_version) { $deps['com.unity.render-pipelines.high-definition'] = $dep.unity.rp_version }
-    $scoped = @()
-    foreach ($name in $dep.registries.Keys) {
-        $scoped += @{ name = $name; url = $dep.registries[$name]; scopes = @($dep.scopes) }
+
+    $scopedMap = [ordered]@{}
+    if ($baseManifest -and $baseManifest.scopedRegistries) {
+        foreach ($entry in $baseManifest.scopedRegistries) {
+            if ($null -ne $entry -and $entry.PSObject.Properties['name']) {
+                $scopedMap[$entry.name] = $entry
+            }
+        }
     }
+
+    foreach ($name in ($dep.registries.Keys | Sort-Object)) {
+        if ($scopedMap.Contains($name)) {
+            $scopedMap[$name].url = $dep.registries[$name]
+            $scopedMap[$name].scopes = @($dep.scopes)
+        }
+        else {
+            $scopedMap[$name] = [ordered]@{ name = $name; url = $dep.registries[$name]; scopes = @($dep.scopes) }
+        }
+    }
+
+    $scoped = @()
+    foreach ($key in ($scopedMap.Keys | Sort-Object)) { $scoped += $scopedMap[$key] }
+
+    foreach ($depName in @($deps.Keys)) {
+        $deps[$depName] = Normalize-FileSpec $projectPath $deps[$depName]
+    }
+
     return @{ dependencies = $deps; scopedRegistries = $scoped }
+}
+
+
+
+function Get-WorkspaceRoot([string]$projectPath) {
+    if ($env:MAGI_WORKSPACE_ROOT) {
+        return [System.IO.Path]::GetFullPath($env:MAGI_WORKSPACE_ROOT)
+    }
+    if ($PSScriptRoot) {
+        return [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    }
+    if ([string]::IsNullOrEmpty($projectPath)) { return $null }
+    return [System.IO.Path]::GetFullPath([System.IO.Path]::GetDirectoryName($projectPath))
+}
+
+function Ensure-WorkspacePath([string]$candidatePath, [string]$projectPath, [string]$specifier) {
+    $root = Get-WorkspaceRoot $projectPath
+    if ([string]::IsNullOrEmpty($root)) { return [System.IO.Path]::GetFullPath($candidatePath) }
+    $normalizedRoot = [System.IO.Path]::GetFullPath($root)
+    if (-not $normalizedRoot.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+        $normalizedRoot += [System.IO.Path]::DirectorySeparatorChar
+    }
+    $normalizedCandidate = [System.IO.Path]::GetFullPath($candidatePath)
+    $platform = [System.Environment]::OSVersion.Platform
+    $comparison = if ($platform -eq [System.PlatformID]::Unix -or $platform -eq [System.PlatformID]::MacOSX) { [System.StringComparison]::Ordinal } else { [System.StringComparison]::OrdinalIgnoreCase }
+    if (-not $normalizedCandidate.StartsWith($normalizedRoot, $comparison)) {
+        throw "Local package path '$specifier' resolves outside the workspace root '$normalizedRoot'. Update the 'file:' reference so it stays within the workspace."
+    }
+    return $normalizedCandidate
+}
+
+function Get-RelativePath($fromPath, $toPath) {
+    $fromFull = [System.IO.Path]::GetFullPath($fromPath)
+    $toFull = [System.IO.Path]::GetFullPath($toPath)
+    if (-not $fromFull.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+        $fromFull += [System.IO.Path]::DirectorySeparatorChar
+    }
+    $fromUri = New-Object System.Uri($fromFull)
+    $toUri = New-Object System.Uri($toFull)
+    $relativeUri = $fromUri.MakeRelativeUri($toUri)
+    $relativePath = [System.Uri]::UnescapeDataString($relativeUri.ToString())
+    return $relativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+}
+
+function Normalize-FileSpec($projectPath, $spec) {
+    if (-not ($spec -is [string])) { return $spec }
+    if ($spec -notmatch '^file:') { return $spec }
+    $absolute = Resolve-LocalPackagePath $projectPath $spec
+    if (-not $absolute) { return $spec }
+    $resolvedProject = (Resolve-Path -Path $projectPath).Path
+    $packagesDir = Join-Path $resolvedProject 'Packages'
+    $relative = Get-RelativePath $packagesDir $absolute
+    return "file:$relative"
 }
 
 function Resolve-LocalPackagePath($projectPath, $spec) {
     if (-not ($spec -is [string])) { return $null }
     if ($spec -notmatch '^file:') { return $null }
     $rel = $spec.Substring(5)
-    $base = Resolve-Path -Path $projectPath
+    $base = (Resolve-Path -Path $projectPath).Path
     $full = [System.IO.Path]::GetFullPath((Join-Path $base $rel))
-    return $full
+    return Ensure-WorkspacePath -candidatePath $full -projectPath $base -specifier $spec
 }
 
 function Read-JsonFile($path) {
-    try { return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { return $null }
+    try { return Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json } catch { return $null }
 }
 
 function Write-JsonFile($path, $obj) {
@@ -121,11 +213,12 @@ function Ensure-LocalPackage($projectPath, $pkgName, $spec, $editorVersion) {
 }
 
 function Write-Manifest($projectPath, $manifestObj) {
-    $packagesPath = Join-Path $projectPath 'Packages'
-    if (!(Test-Path $packagesPath)) { New-Item -ItemType Directory -Force -Path $packagesPath | Out-Null }
+    $resolvedProject = (Resolve-Path -Path $projectPath).Path
+    $packagesPath = Join-Path $resolvedProject 'Packages'
+    if (!(Test-Path $packagesPath)) {
+        New-Item -ItemType Directory -Force -Path $packagesPath | Out-Null
+    }
     $manifestPath = Join-Path $packagesPath 'manifest.json'
-    # Resolve to absolute path
-    $manifestPath = [System.IO.Path]::GetFullPath($manifestPath)
     $json = $manifestObj | ConvertTo-Json -Depth 5
     # Write without BOM for Unity compatibility
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -144,6 +237,25 @@ function Load-Manifest($projectPath) {
     if (!(Test-Path $path)) { return $null }
     return Get-Content $path -Raw | ConvertFrom-Json
 }
+
+function Load-LockDependencies($projectPath) {
+    $lockPath = Join-Path (Join-Path $projectPath 'Packages') 'packages-lock.json'
+    if (!(Test-Path $lockPath)) { return @{} }
+    try { $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json } catch { return @{} }
+
+    $deps = @{}
+    if ($lock.dependencies) {
+        foreach ($prop in $lock.dependencies.PSObject.Properties) {
+            $value = $prop.Value
+            if ($null -eq $value) { continue }
+            if ($value.PSObject.Properties['version']) {
+                $deps[$prop.Name] = $value.version
+            }
+        }
+    }
+    return $deps
+}
+
 
 function Check-Policy($projectPath, $dep, [switch]$Strict) {
     $ok = $true
@@ -167,7 +279,12 @@ function Check-Policy($projectPath, $dep, [switch]$Strict) {
         foreach ($f in $csFiles) {
             $content = Get-Content $f.FullName -Raw
             foreach ($api in $dep.policy.bannedApis) {
-                if ($content -match [Regex]::Escape($api)) {
+                $escaped = [Regex]::Escape($api)
+                $pattern = $escaped
+                if ($api -notmatch '\(') {
+                    $pattern += '\s*(<[^>]+>\s*)?\('
+                }
+                if ([Regex]::IsMatch($content, $pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
                     Write-Host "Policy violation: '$api' found in $($f.FullName)" -ForegroundColor Red
                     $ok = $false
                 }
@@ -178,6 +295,8 @@ function Check-Policy($projectPath, $dep, [switch]$Strict) {
     return $ok
 }
 
+
+
 switch ($Command) {
     'apply' {
         $dep = Parse-Depfile (Join-Path $ProjectPath $Depfile)
@@ -187,14 +306,14 @@ switch ($Command) {
             $spec = $dep.packages[$k]
             Ensure-LocalPackage -projectPath $ProjectPath -pkgName $k -spec $spec -editorVersion $dep.unity.editor
         }
-        $manifestObj = Make-Manifest $dep
+        $manifestObj = Make-Manifest -dep $dep -projectPath $ProjectPath
         Write-Manifest -projectPath $ProjectPath -manifestObj $manifestObj
         Check-Policy -projectPath $ProjectPath -dep $dep -Strict:$Strict | Out-Null
     }
     'verify' {
         $dep = Parse-Depfile (Join-Path $ProjectPath $Depfile)
         foreach ($k in $dep.packages.Keys) { Ensure-LocalPackage -projectPath $ProjectPath -pkgName $k -spec $dep.packages[$k] -editorVersion $dep.unity.editor }
-        $expected = Make-Manifest $dep
+        $expected = Make-Manifest -dep $dep -projectPath $ProjectPath
         $actual = Load-Manifest $ProjectPath
         if ($actual -eq $null) { Write-Host "No manifest.json present" -ForegroundColor Yellow; if ($Strict){ exit 3 } else { exit 0 } }
         $same = Compare-Manifests $expected $actual
@@ -233,3 +352,10 @@ policy:
         Write-Host "Created depfile: $depfilePath"
     }
 }
+
+
+
+
+
+
+
