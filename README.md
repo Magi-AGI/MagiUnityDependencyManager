@@ -238,11 +238,12 @@ Get-ChildItem -Directory | ForEach-Object {
 
 ## Best Practices
 
-1. **Version Control**: Always commit both `depfile.yaml` and `packages-lock.json`
-2. **Regular Updates**: Run `verify` in CI to catch drift early
-3. **Policy Documentation**: Document policy exceptions in `depfile.yaml`
-4. **Local Development**: Use local paths for packages under active development
-5. **Production Builds**: Use registry packages with exact versions
+1. **Consistent Folder Layout**: Keep runtime scripts under `Assets/_Project/Scripts/...` and editor-only utilities under `Assets/_Project/Editor/...`. Avoid project-name folders; prefer feature-based subfolders such as `Scripts/UnityTools/Core` or `Scripts/BoardGame/Rules`.
+2. **Package Roots**: Point each `file:` dependency at the folder that contains `package.json` and the primary asmdef (for example `Assets/_Project/Scripts/UnityTools`). Keep the asmdef and manifest in the package root.
+3. **Version Control**: Always commit both `depfile.yaml` and `Packages/packages-lock.json`.
+4. **Regular Verification**: Run `./magi-deps.ps1 verify -Strict` locally and in CI before merging.
+5. **Policy Documentation**: Record exceptions in `depfile.yaml` so reviewers understand intentional deviations.
+6. **Production Builds**: Prefer registry packages with fixed versions; restrict `file:` references to active development.
 
 ## Troubleshooting
 
