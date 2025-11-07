@@ -238,8 +238,8 @@ Get-ChildItem -Directory | ForEach-Object {
 
 ## Best Practices
 
-1. **Consistent Folder Layout**: Keep runtime scripts under `Assets/_Project/Scripts/...` and editor-only utilities under `Assets/_Project/Editor/...`. Avoid project-name folders; prefer feature-based subfolders such as `Scripts/UnityTools/Core` or `Scripts/BoardGame/Rules`.
-2. **Package Roots**: Point each `file:` dependency at the folder that contains `package.json` and the primary asmdef (for example `Assets/_Project/Scripts/UnityTools`). Keep the asmdef and manifest in the package root.
+1. **Consistent Folder Layout**: Keep runtime scripts under `Assets/_Project/Scripts/...` and editor-only utilities under `Assets/_Project/Editor/...`. Avoid project-name folders; prefer feature-based subfolders such as `Scripts/Core` or `Scripts/BoardGame/Rules`.
+2. **Package Roots**: Point each `file:` dependency at the folder that contains `package.json` and the primary asmdef (for example `Assets/_Project/Scripts`). Keep the asmdef and manifest in the package root.
 3. **Version Control**: Always commit both `depfile.yaml` and `Packages/packages-lock.json`.
 4. **Regular Verification**: Run `./magi-deps.ps1 verify -Strict` locally and in CI before merging.
 5. **Policy Documentation**: Record exceptions in `depfile.yaml` so reviewers understand intentional deviations.

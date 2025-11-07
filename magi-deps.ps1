@@ -295,6 +295,143 @@ function Check-Policy($projectPath, $dep, [switch]$Strict) {
     return $ok
 }
 
+function Resolve-ComputeShaderIncludes($projectPath, $dep) {
+    # Resolve compute shader cross-package includes
+    # Unity compute shaders cannot reference files from other UPM packages via #include
+    # This function creates .asmdef exclude patterns to prevent .cs files in shader directories from being compiled
+
+    Write-Host "Resolving compute shader dependencies..." -ForegroundColor Cyan
+
+    foreach ($pkgName in $dep.packages.Keys) {
+        $spec = $dep.packages[$pkgName]
+        if (-not ($spec -match '^file:')) { continue }
+
+        $pkgPath = Resolve-LocalPackagePath $projectPath $spec
+        if (-not (Test-Path $pkgPath)) { continue }
+
+        # Find compute shader directories
+        $computeDirs = Get-ChildItem -Path $pkgPath -Recurse -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq "Compute" }
+
+        foreach ($computeDir in $computeDirs) {
+            # Find any .cs files that are used as shader includes (X-Macro pattern)
+            $shaderCsFiles = Get-ChildItem -Path $computeDir.FullName -Recurse -Filter "*.cs" -ErrorAction SilentlyContinue
+
+            foreach ($csFile in $shaderCsFiles) {
+                # Check if this .cs file is referenced by a shader
+                $content = Get-Content $csFile.FullName -Raw -ErrorAction SilentlyContinue
+                if ($content -match '#define public' -or $content -match 'CSHARP_7_3_OR_NEWER') {
+                    # This is an X-Macro file - create a .meta file to mark it as shader include
+                    $metaPath = $csFile.FullName + ".meta"
+                    if (-not (Test-Path $metaPath)) {
+                        # Create meta file that marks this as a non-script asset
+                        $metaContent = @"
+fileFormatVersion: 2
+guid: $([guid]::NewGuid().ToString("N"))
+DefaultImporter:
+  externalObjects: {}
+  userData:
+  assetBundleName:
+  assetBundleVariant:
+"@
+                        Set-Content -Path $metaPath -Value $metaContent -Encoding UTF8
+                        Write-Host "    Created .meta for X-Macro file: $($csFile.Name)" -ForegroundColor Green
+                    }
+                }
+            }
+        }
+
+        # Original cross-package include resolution (now disabled - rely on Unity's package system)
+        # Keeping this commented for reference
+        <#
+        $pkgPath = Resolve-LocalPackagePath $projectPath $spec
+        if (-not (Test-Path $pkgPath)) { continue }
+
+        # Find all compute shaders and shader includes in this package
+        $shaderFiles = @()
+        $shaderFiles += Get-ChildItem -Path $pkgPath -Recurse -Filter "*.compute" -ErrorAction SilentlyContinue
+        $shaderFiles += Get-ChildItem -Path $pkgPath -Recurse -Filter "*.hlsl" -ErrorAction SilentlyContinue
+
+        foreach ($shader in $shaderFiles) {
+            $content = Get-Content $shader.FullName -Raw
+
+            # Find cross-package includes (e.g., "../../PackageName/...")
+            $includePattern = '#include\s+"(\.\./.*?)"'
+            $matches = [regex]::Matches($content, $includePattern)
+
+            if ($matches.Count -eq 0) { continue }
+
+            Write-Host "  Processing $($shader.Name) in $pkgName..." -ForegroundColor Gray
+
+            foreach ($match in $matches) {
+                $includePath = $match.Groups[1].Value
+
+                # Resolve the full path of the included file
+                $shaderDir = $shader.DirectoryName
+                $fullIncludePath = [System.IO.Path]::GetFullPath((Join-Path $shaderDir $includePath))
+
+                # Check if this include crosses package boundaries
+                $normalizedPkgPath = [System.IO.Path]::GetFullPath($pkgPath)
+                if ($fullIncludePath.StartsWith($normalizedPkgPath, [StringComparison]::OrdinalIgnoreCase)) {
+                    # Include is within the same package, no action needed
+                    continue
+                }
+
+                # Cross-package include detected - need to copy the file
+                if (-not (Test-Path $fullIncludePath)) {
+                    Write-Host "    WARNING: Include file not found: $includePath" -ForegroundColor Yellow
+                    continue
+                }
+
+                # Determine the dependency package this file belongs to
+                $depPkgName = $null
+                foreach ($depName in $dep.packages.Keys) {
+                    $depSpec = $dep.packages[$depName]
+                    if ($depSpec -notmatch '^file:') { continue }
+
+                    $depPath = Resolve-LocalPackagePath $projectPath $depSpec
+                    $normalizedDepPath = [System.IO.Path]::GetFullPath($depPath)
+                    if ($fullIncludePath.StartsWith($normalizedDepPath, [StringComparison]::OrdinalIgnoreCase)) {
+                        $depPkgName = $depName
+                        break
+                    }
+                }
+
+                if ($null -eq $depPkgName) {
+                    Write-Host "    WARNING: Could not determine source package for: $includePath" -ForegroundColor Yellow
+                    continue
+                }
+
+                # Create a local Includes directory in the shader's package
+                $includesDir = Join-Path $shaderDir "Includes"
+                if (-not (Test-Path $includesDir)) {
+                    New-Item -ItemType Directory -Force -Path $includesDir | Out-Null
+                }
+
+                # Copy the include file, renaming .cs to .cginc for X-Macro shader files
+                $fileName = [System.IO.Path]::GetFileName($fullIncludePath)
+                $destFileName = $fileName
+                if ($fileName -match '\.cs$') {
+                    $destFileName = $fileName -replace '\.cs$', '.cginc'
+                    Write-Host "    Renaming $fileName to $destFileName (X-Macro shader file)" -ForegroundColor Gray
+                }
+                $destPath = Join-Path $includesDir $destFileName
+
+                Copy-Item -Path $fullIncludePath -Destination $destPath -Force
+                Write-Host "    Copied: $fileName from $depPkgName to $pkgName/Includes/ as $destFileName" -ForegroundColor Green
+
+                # Update the compute shader to use the local include with the new filename
+                $newInclude = "#include `"Includes/$destFileName`""
+                $oldInclude = $match.Value
+                $content = $content.Replace($oldInclude, $newInclude)
+            }
+
+            # Write the updated shader file
+            Set-Content -Path $shader.FullName -Value $content -Encoding UTF8
+        }
+    }
+
+    Write-Host "Compute shader dependency resolution complete." -ForegroundColor Cyan
+}
 
 
 switch ($Command) {
@@ -306,6 +443,11 @@ switch ($Command) {
             $spec = $dep.packages[$k]
             Ensure-LocalPackage -projectPath $ProjectPath -pkgName $k -spec $spec -editorVersion $dep.unity.editor
         }
+
+        # Resolve compute shader cross-package includes
+        # DISABLED: This feature needs more work to avoid modifying source packages
+        # Resolve-ComputeShaderIncludes -projectPath $ProjectPath -dep $dep
+
         $manifestObj = Make-Manifest -dep $dep -projectPath $ProjectPath
         Write-Manifest -projectPath $ProjectPath -manifestObj $manifestObj
         Check-Policy -projectPath $ProjectPath -dep $dep -Strict:$Strict | Out-Null
