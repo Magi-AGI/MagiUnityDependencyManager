@@ -1,18 +1,40 @@
+# depfile.yaml schema (example format)
+version: 1.0
+
+project:
+  name: ExampleProject
+  unityVersion: 6000.2.0f1
+  targetPlatforms:
+    - StandaloneWindows64
+
 registries:
-  # key: URL
-  example: https://registry.example.com
-scopes:
-  - com.example
-unity:
-  editor: 6000.2.0f1        # Unity editor version pin
-  rp: urp                   # or 'hdrp'
-  rp_version: 17.0.3        # render pipeline package version
+  - name: Unity
+    url: https://packages.unity.com
+    scopes:
+      - com.unity
+  - name: Example
+    url: https://registry.example.com
+    scopes:
+      - com.example
+
 packages:
-  # package-id: semver
-  com.unity.inputsystem: 1.7.0
+  # Registry packages
+  - name: com.unity.inputsystem
+    version: 1.7.0
+    source: registry
+
+  # Local packages
+  - name: com.example.localpkg
+    path: ../SomeLocalPackage
+    source: local
+
+  # Git packages (requires allowGitDependencies or policy exception)
+  - name: com.example.tooling
+    url: https://github.com/example/tooling.git#v1.2.3
+    source: git
+
 policy:
   allowGitDependencies: false
-  bannedApis:
+  bannedAPIs:
     - Resources.Load
     - FindObjectOfType
-

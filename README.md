@@ -10,7 +10,7 @@ MagiUnityDependencyManager provides centralized, policy-driven dependency manage
 
 - **Single Source of Truth**: `depfile.yaml` drives `Packages/manifest.json` generation
 - **Policy Enforcement**: Configurable rules for API usage, dependency sources, and version constraints
-- **Lock File Verification**: Ensures reproducible builds via `packages-lock.json` validation
+- **Lock File Awareness**: Reads `packages-lock.json` when present (Unity still owns lockfile generation)
 - **Registry Management**: Support for Unity, npm, and private scoped registries
 - **Batch Operations**: Manage multiple Unity projects from a single location
 
@@ -36,7 +36,7 @@ All commands are executed via the `magi-deps.ps1` PowerShell script:
 ```powershell
 ./magi-deps.ps1 init -ProjectPath ../Inkling
 ```
-Creates a starter `depfile.yaml` based on existing `manifest.json`.
+Creates a starter `depfile.yaml` template.
 
 #### Apply dependencies
 ```powershell
@@ -48,19 +48,29 @@ Generates `Packages/manifest.json` from `depfile.yaml`.
 ```powershell
 ./magi-deps.ps1 verify -ProjectPath ../Inkling -Strict
 ```
-Checks for lockfile drift and policy violations.
+Checks for manifest drift and policy violations.
 
 #### Show active policy
 ```powershell
-./magi-deps.ps1 policy
+./magi-deps.ps1 policy -ProjectPath ../Inkling
 ```
 Displays current policy rules and banned APIs.
 
-#### Update dependencies
+#### Validate depfile.yaml
 ```powershell
-./magi-deps.ps1 update -ProjectPath ../Inkling -Package com.unity.render-pipelines.universal
+./magi-deps.ps1 validate -ProjectPath ../Inkling
 ```
-Updates specific packages to latest compatible versions.
+Validates depfile parsing and manifest generation without writing files.
+
+### Tests
+
+```powershell
+# Regression test suite for common failure cases
+./self-test.ps1
+
+# Validate all Unity projects in a workspace (depfile.yaml must be in the Unity project root)
+./validate-workspace.ps1 -WorkspaceRoot ..
+```
 
 ### depfile.yaml Structure
 
@@ -138,6 +148,8 @@ policy:
 
 ## Policy System
 
+Note: The current `magi-deps.ps1` policy checks are intentionally minimal (Git/URL dependency blocking and banned API scanning).
+
 ### Default Policies
 
 1. **No Git Dependencies**: Packages must come from registries or local paths
@@ -199,11 +211,10 @@ jobs:
             -ProjectPath . `
             -Strict
 
-      - name: Check Policy Compliance
+      - name: Show Policy
         run: |
           ../MagiUnityDependencyManager/magi-deps.ps1 policy `
-            -ProjectPath . `
-            -CheckCompliance
+            -ProjectPath .
 ```
 
 ## Advanced Features
@@ -217,23 +228,6 @@ Process multiple projects:
 Get-ChildItem -Directory | ForEach-Object {
     ./magi-deps.ps1 apply -ProjectPath $_.FullName
 }
-```
-
-### Dependency Analysis
-
-```powershell
-# Analyze dependency graph
-./magi-deps.ps1 analyze -ProjectPath ../Inkling -OutputFormat dot
-
-# Find conflicting dependencies
-./magi-deps.ps1 conflicts -ProjectPath ../Inkling
-```
-
-### Migration from manifest.json
-
-```powershell
-# Convert existing manifest.json to depfile.yaml
-./magi-deps.ps1 migrate -ProjectPath ../OldProject
 ```
 
 ## Best Practices
@@ -265,7 +259,7 @@ Get-ChildItem -Directory | ForEach-Object {
 
 ## Schema Reference
 
-See [depfile.schema.yaml](depfile.schema.yaml) for the complete schema definition with all available options and validation rules.
+See [depfile.schema.yaml](depfile.schema.yaml) for an example schema and format reference.
 
 ## Related Projects
 

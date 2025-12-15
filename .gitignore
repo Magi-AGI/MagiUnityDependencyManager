@@ -118,6 +118,11 @@
 **/*.booproj
 **/*.svd
 **/*.pdb
+
+# MagiUnityDependencyManager self-test artifacts
+.self-test-work/
+.self-test-*/
+.tmp-delete-test/
 **/*.mdb
 **/*.opendb
 **/*.VC.db
